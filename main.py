@@ -3,12 +3,47 @@ from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from datetime import timedelta
+import os
 import models, schemas, auth, database
 from database import engine, get_db
 from typing import List
 
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+
+def _otel_traces_endpoint() -> str:
+    traces_endpoint = os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+    if traces_endpoint:
+        return traces_endpoint
+
+    base_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if base_endpoint:
+        return f"{base_endpoint.rstrip('/')}/v1/traces"
+
+    return "http://172.15.1.100:4318/v1/traces"
+
+
+def setup_otel():
+    if os.getenv("OTEL_DISABLED", "").lower() in {"1", "true", "yes"}:
+        return
+
+    service_name = os.getenv("OTEL_SERVICE_NAME", "trae-fastapi")
+    resource = Resource.create({"service.name": service_name})
+    provider = TracerProvider(resource=resource)
+    trace.set_tracer_provider(provider)
+
+    exporter = OTLPSpanExporter(endpoint=_otel_traces_endpoint())
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+
 # Create database tables
 models.Base.metadata.create_all(bind=engine)
+
+setup_otel()
 
 app = FastAPI(
     title="Sample API App",
@@ -17,6 +52,8 @@ app = FastAPI(
     docs_url="/docs-api", # Custom swagger path
     redoc_url=None
 )
+
+FastAPIInstrumentor.instrument_app(app)
 
 # Helper function for standard response
 def standard_response(code: int, status: str, message: str, data: any = None):
